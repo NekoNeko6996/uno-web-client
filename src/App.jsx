@@ -7,9 +7,9 @@ import './index.css'
 function App() {
   const [playerName, setPlayerName] = useState('')
   const [roomCodeInput, setRoomCodeInput] = useState('')
-   
+
   const [currentRoom, setCurrentRoom] = useState(null)
-  const [gameState, setGameState] = useState(null) 
+  const [gameState, setGameState] = useState(null)
 
   // eslint-disable-next-line no-unused-vars
   const [isConnected, setIsConnected] = useState(false)
@@ -17,10 +17,9 @@ function App() {
 
   const [showColorPicker, setShowColorPicker] = useState(false)
   const [pendingCardIndex, setPendingCardIndex] = useState(null)
+  
   const SERVER_URL = 'http://192.168.1.62:8080'
 
-
-  // --- PHỤC HỒI CÁC HÀM API BỊ MẤT ---
   const handleCreateRoom = async () => {
     if (!playerName) return alert("Vui lòng nhập tên!")
     try {
@@ -34,27 +33,56 @@ function App() {
     try {
       const res = await fetch(`${SERVER_URL}/api/rooms/join?roomCode=${roomCodeInput}&playerName=${encodeURIComponent(playerName)}`, { method: 'POST' })
       if (!res.ok) return alert(await res.text())
-      setCurrentRoom(await res.json())
+      const resRoom = await res.json()
+      setCurrentRoom(resRoom)
+    } catch (error) { console.error(error) }
+  }
+
+  const fetchRoomInfo = async () => {
+    if (!currentRoom?.roomId) return;
+    try {
+      const res = await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}`);
+      if (res.ok) {
+        const updatedRoom = await res.json();
+        // CÁCH LY LỖI: Kiểm tra xem mình còn trong danh sách phòng trên server không
+        const amIStillInRoom = updatedRoom.players.some(p => p.name === playerName);
+        if (!amIStillInRoom) {
+          // Nếu không còn (do thoát/bị kích) -> Dọn dẹp và ra sảnh
+          if (stompClientRef.current) stompClientRef.current.deactivate();
+          setCurrentRoom(null);
+          setGameState(null);
+        } else {
+          setCurrentRoom(updatedRoom);
+        }
+      }
+    } catch (error) { console.error("Lỗi cập nhật phòng:", error) }
+  }
+
+  const handleKickPlayer = async (targetName) => {
+    try {
+      const res = await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/kick?hostName=${encodeURIComponent(playerName)}&targetName=${encodeURIComponent(targetName)}`, { method: 'POST' });
+      if (!res.ok) alert(await res.text());
     } catch (error) { console.error(error) }
   }
 
   const handleStartGame = async () => {
     try {
-      await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/start`, { method: 'POST' })
-    } catch (error) { console.error("Lỗi khi bắt đầu game:", error) }
+      const res = await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/start`, { method: 'POST' });
+      if (!res.ok) alert(await res.text());
+    } catch (error) { console.error("Lỗi khi bắt đầu game:", error)}
   }
 
   const fetchGameState = async () => {
     try {
       const res = await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/state?playerName=${encodeURIComponent(playerName)}`)
       if (res.ok) setGameState(await res.json())
-    } catch (error) { console.error("Lỗi khi lấy dữ liệu bài:", error) }
+    } catch (error) { console.error("Lỗi khi lấy dữ liệu:", error) }
   }
 
   const handleDrawCard = async () => {
     try {
       const res = await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/draw?playerName=${encodeURIComponent(playerName)}`, { method: 'POST' })
-      if (!res.ok) alert(await res.text()) 
+      if (!res.ok) alert(await res.text())
     } catch (error) { console.error(error) }
   }
 
@@ -64,31 +92,64 @@ function App() {
       setShowColorPicker(true);
       return;
     }
-
     try {
       let url = `${SERVER_URL}/api/rooms/${currentRoom.roomId}/play?playerName=${encodeURIComponent(playerName)}&cardIndex=${index}`
       if (selectedColor) url += `&selectedColor=${selectedColor}`
-
-      const res = await fetch(url, { method: 'POST' })
-      if (!res.ok) alert("❌ " + await res.text())
-      
+      await fetch(url, { method: 'POST' })
       setShowColorPicker(false);
       setPendingCardIndex(null);
     } catch (error) { console.error(error) }
   }
 
-  // --- PHỤC HỒI WEBSOCKET EFFECT ---
+  const handleCallUno = async () => {
+    await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/call-uno?playerName=${encodeURIComponent(playerName)}`, { method: 'POST' })
+  }
+
+  const handleCatchUno = async () => {
+    const res = await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/catch-uno`, { method: 'POST' })
+    if (!res.ok) alert(await res.text())
+  }
+
+  const handleResolveChallenge = async (isChallenge) => {
+    const res = await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/challenge?playerName=${encodeURIComponent(playerName)}&isChallenge=${isChallenge}`, { method: 'POST' })
+    if (!res.ok) alert(await res.text())
+  }
+
+  const handlePlayAgain = async () => {
+    await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/reset`, { method: 'POST' })
+  }
+
+  const handleLeaveRoom = async () => {
+    // VÁ LỖI: Cúp cầu dao WebSocket ngay lập tức để không nhận event ROOM_UPDATED nữa
+    if (stompClientRef.current) stompClientRef.current.deactivate();
+    
+    await fetch(`${SERVER_URL}/api/rooms/${currentRoom.roomId}/leave?playerName=${encodeURIComponent(playerName)}`, { method: 'POST' })
+    setCurrentRoom(null);
+    setGameState(null);
+  }
+
+  const roomId = currentRoom?.roomId;
   useEffect(() => {
-    if (!currentRoom) return;
+    if (!roomId) return;
     const socket = new SockJS(`${SERVER_URL}/ws`)
     const client = new Client({
       webSocketFactory: () => socket,
       onConnect: () => {
         setIsConnected(true)
-        const roomTopic = `/topic/room/${currentRoom.roomId}`
-        client.subscribe(roomTopic, (message) => {
-          if (message.body === 'GAME_STARTED' || message.body === 'BOARD_UPDATED') {
-            fetchGameState()
+        client.subscribe(`/topic/room/${roomId}`, (message) => {
+          const action = message.body;
+          if (action === 'GAME_STARTED' || action === 'BOARD_UPDATED') {
+            fetchGameState();
+          } else if (action === 'GAME_RESET') {
+            setGameState(null);
+          } else if (action === 'ROOM_UPDATED') {
+            fetchRoomInfo(); 
+          } else if (action === `KICKED_${playerName}`) {
+            // VÁ LỖI: Cúp cầu dao WebSocket khi bị kích
+            if (stompClientRef.current) stompClientRef.current.deactivate();
+            alert('Bạn đã bị chủ phòng mời ra ngoài!');
+            setCurrentRoom(null);
+            setGameState(null);
           }
         })
       },
@@ -97,10 +158,10 @@ function App() {
     client.activate()
     stompClientRef.current = client
     return () => { if (stompClientRef.current) stompClientRef.current.deactivate() }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentRoom])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId])
 
-  // --- RENDERING ---
+  // ================= UI ĐĂNG NHẬP (GIỮ NGUYÊN BẢN CŨ) =================
   if (!currentRoom) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
@@ -116,25 +177,20 @@ function App() {
     )
   }
 
+  // ================= UI TRONG GAME =================
   if (gameState) {
     return (
       <>
-        <GameBoard 
-          gameState={gameState} 
-          playerName={playerName} 
-          onPlayCard={handlePlayCard} 
-          onDrawCard={handleDrawCard} 
-        />
-
+        <GameBoard gameState={gameState} playerName={playerName} onPlayCard={handlePlayCard} onDrawCard={handleDrawCard} onCallUno={handleCallUno} onCatchUno={handleCatchUno} onResolveChallenge={handleResolveChallenge} onPlayAgain={handlePlayAgain} onLeaveRoom={handleLeaveRoom} />
         {showColorPicker && (
-          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-100 backdrop-blur-sm">
-            <div className="bg-white p-6 rounded-2xl shadow-2xl text-center">
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-200">
+            <div className="bg-white p-6 rounded-xl text-center">
               <h3 className="text-2xl font-bold mb-4 text-gray-800">Chọn màu đổi</h3>
               <div className="grid grid-cols-2 gap-4">
-                <button onClick={() => handlePlayCard(gameState.myHand[pendingCardIndex], pendingCardIndex, 'RED')} className="w-20 h-20 bg-red-600 rounded-xl hover:scale-110 shadow-lg border-4 border-transparent hover:border-gray-800 transition-transform"></button>
-                <button onClick={() => handlePlayCard(gameState.myHand[pendingCardIndex], pendingCardIndex, 'BLUE')} className="w-20 h-20 bg-blue-600 rounded-xl hover:scale-110 shadow-lg border-4 border-transparent hover:border-gray-800 transition-transform"></button>
-                <button onClick={() => handlePlayCard(gameState.myHand[pendingCardIndex], pendingCardIndex, 'GREEN')} className="w-20 h-20 bg-green-600 rounded-xl hover:scale-110 shadow-lg border-4 border-transparent hover:border-gray-800 transition-transform"></button>
-                <button onClick={() => handlePlayCard(gameState.myHand[pendingCardIndex], pendingCardIndex, 'YELLOW')} className="w-20 h-20 bg-yellow-400 rounded-xl hover:scale-110 shadow-lg border-4 border-transparent hover:border-gray-800 transition-transform"></button>
+                <button onClick={() => handlePlayCard(gameState.myHand[pendingCardIndex], pendingCardIndex, 'RED')} className="w-20 h-20 bg-red-600 rounded"></button>
+                <button onClick={() => handlePlayCard(gameState.myHand[pendingCardIndex], pendingCardIndex, 'BLUE')} className="w-20 h-20 bg-blue-600 rounded"></button>
+                <button onClick={() => handlePlayCard(gameState.myHand[pendingCardIndex], pendingCardIndex, 'GREEN')} className="w-20 h-20 bg-green-600 rounded"></button>
+                <button onClick={() => handlePlayCard(gameState.myHand[pendingCardIndex], pendingCardIndex, 'YELLOW')} className="w-20 h-20 bg-yellow-400 rounded"></button>
               </div>
               <button onClick={() => setShowColorPicker(false)} className="mt-6 text-gray-500 hover:text-gray-800 font-bold underline">Hủy bỏ</button>
             </div>
@@ -144,15 +200,65 @@ function App() {
     )
   }
 
+  // ================= UI PHÒNG CHỜ (LOBBY) CLEAN =================
+  const isHost = currentRoom.host.name === playerName;
+
   return (
-    <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">
-      <div className="text-center">
-        <h1 className="text-3xl mb-4">Phòng: {currentRoom.roomId}</h1>
-        {currentRoom.host.name === playerName ? (
-          <button onClick={handleStartGame} className="bg-red-600 px-8 py-4 rounded-xl font-bold text-xl animate-pulse hover:bg-red-700">🚀 BẮT ĐẦU GAME</button>
-        ) : (
-          <p className="text-gray-400 animate-pulse">Đang chờ chủ phòng bắt đầu...</p>
-        )}
+    <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center text-white p-4 font-sans">
+      <div className="w-full max-w-sm text-center">
+        
+        <h1 className="text-4xl mb-2 font-black">Phòng: {currentRoom.roomId}</h1>
+        <p className="text-gray-400 mb-8">{currentRoom.players.length}/4 người chơi</p>
+
+        {/* Danh sách người chơi - Không bọc trong box rườm rà, chỉ kẻ vạch ngang phân cách */}
+        <div className="mb-10 text-left">
+          {currentRoom.players.map((p) => {
+            const isThisPlayerHost = currentRoom.host.name === p.name;
+            const isMe = p.name === playerName;
+            
+            return (
+              <div key={p.name} className="flex justify-between items-center py-3 border-b border-gray-800 last:border-0">
+                <span className={`text-xl ${isMe ? 'text-yellow-400' : ''}`}>
+                  {p.name} {isThisPlayerHost && '(chủ phòng)'}
+                </span>
+                
+                {/* Nút Kick đơn giản */}
+                {isHost && !isMe && (
+                  <button 
+                    onClick={() => handleKickPlayer(p.name)} 
+                    className="text-red-500 hover:text-red-400 font-semibold text-sm uppercase"
+                  >
+                    Kích
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Khu vực nút chức năng */}
+        <div className="flex flex-col gap-4">
+          {isHost ? (
+            <button 
+              onClick={handleStartGame} 
+              className="w-full bg-red-600 px-8 py-4 rounded font-bold text-xl hover:bg-red-700 transition"
+            >
+              🚀 BẮT ĐẦU GAME
+            </button>
+          ) : (
+            <p className="text-gray-400 animate-pulse text-lg py-4">
+              Đang chờ chủ phòng bắt đầu...
+            </p>
+          )}
+          
+          <button 
+            onClick={handleLeaveRoom} 
+            className="w-full text-gray-500 hover:text-white underline py-2 font-semibold"
+          >
+            Thoát phòng
+          </button>
+        </div>
+
       </div>
     </div>
   )
